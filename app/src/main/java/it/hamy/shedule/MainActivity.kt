@@ -1,5 +1,6 @@
 package it.hamy.shedule
 
+import android.content.Intent
 import android.os.Bundle
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -24,6 +25,13 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        if (!PreferencesManager.isGroupSelected(this)) {
+            startActivity(Intent(this, GroupSelectionActivity::class.java))
+            finish()
+            return
+        }
+
         setContentView(R.layout.activity_main)
 
         recyclerView = findViewById(R.id.recyclerView)
@@ -36,10 +44,19 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun fetchSchedule() {
+        val selectedGroup = PreferencesManager.getGroup(this)
+        val url = when (selectedGroup) {
+            "ИСП-22" -> "http://schedule.ckstr.ru/cg107.htm"
+            "ИСП-21" -> "http://schedule.ckstr.ru/cg106.htm"
+            else -> "http://schedule.ckstr.ru/cg107.htm" // По умолчанию
+        }
+
+
+
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 // Загрузка HTML-страницы с указанием кодировки windows-1251
-                val url = "http://schedule.ckstr.ru/cg107.htm"
+
                 val response = Jsoup.connect(url).execute()
                 val html = response.bodyAsBytes().toString(Charset.forName("windows-1251")) // Преобразуем в нужную кодировку
                 val doc: Document = Jsoup.parse(html)
@@ -77,8 +94,8 @@ class MainActivity : AppCompatActivity() {
 
             val timeCell = row.select("td.hd").firstOrNull { it.attr("rowspan").isEmpty() }?.text()
             val subjectCell = row.select("a.z1").text()
-            val teacherCell = row.select("a.z3").text() // Предполагается, что есть класс для преподавателя
-            val roomCell = row.select("a.z2").text() // Предполагается, что есть класс для кабинета
+            val teacherCell = row.select("a.z3").text() // класс для преподавателя
+            val roomCell = row.select("a.z2").text() // класс для кабинета
 
             if (!timeCell.isNullOrEmpty() && !subjectCell.isNullOrEmpty()) {
                 scheduleList.add(ScheduleItem(currentDay, timeCell, subjectCell, teacherCell, roomCell))
