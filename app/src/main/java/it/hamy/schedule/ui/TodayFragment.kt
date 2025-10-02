@@ -8,6 +8,7 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.fragment.app.Fragment
@@ -16,13 +17,12 @@ import androidx.cardview.widget.CardView
 import it.hamy.schedule.R
 import it.hamy.schedule.databinding.FragmentTodayBinding
 import it.hamy.schedule.model.ScheduleItem
+import it.hamy.schedule.utils.Cache
+import it.hamy.schedule.utils.ParseBellSchedule
+import it.hamy.schedule.utils.ParseToday
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.jsoup.Jsoup
-import org.jsoup.nodes.Document
-import org.jsoup.select.Elements
-import java.nio.charset.Charset
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -31,8 +31,7 @@ class TodayFragment : Fragment() {
     private var _binding: FragmentTodayBinding? = null
     private val binding get() = _binding!!
     private val scheduleItems = mutableListOf<ScheduleItem>()
-    private val gson = com.google.gson.Gson()
-
+    private var bellSchedule: it.hamy.schedule.model.BellSchedule? = null
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -44,6 +43,8 @@ class TodayFragment : Fragment() {
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
+
         val prefs = requireContext().getSharedPreferences("settings", 0)
         val group = prefs.getString("group", null)
 
@@ -53,134 +54,84 @@ class TodayFragment : Fragment() {
         }
 
         binding.progressBar.visibility = View.VISIBLE
+
         lifecycleScope.launch {
+            Log.d("BELL_SCHEDULE", "🚀 [ФРАГМЕНТ] Начинаем загрузку расписания для группы: $group")
+
+            bellSchedule = loadBellSchedule()
+            Log.d("BELL_SCHEDULE", "🔔 [ФРАГМЕНТ] Расписание звонков загружено: $bellSchedule")
+
             if (isNetworkAvailable()) {
                 loadTodaySchedule(group)
             } else {
                 loadScheduleFromCache()
             }
         }
-
-
-
-
-
-
     }
 
     private suspend fun loadTodaySchedule(group: String) {
         withContext(Dispatchers.IO) {
             try {
-                val url = "http://schedule.ckstr.ru/hg.htm"
-                val response = Jsoup.connect(url).execute()
-                val html = String(response.bodyAsBytes(), charset("windows-1251"))
-                val doc: Document = Jsoup.parse(html)
-
-                val date = parseDate(doc)
-                parseSchedule(doc, group, date)
-
-                saveScheduleToCache(scheduleItems)
-
+                val fetchedSchedule = ParseToday.fetchTodaySchedule(group)
                 withContext(Dispatchers.Main) {
+                    scheduleItems.clear()
+                    scheduleItems.addAll(fetchedSchedule)
+                    saveScheduleToCache()
                     showSchedule()
                 }
             } catch (e: Exception) {
-                e.printStackTrace()
                 withContext(Dispatchers.Main) {
                     Toast.makeText(requireContext(), "Ошибка загрузки расписания", Toast.LENGTH_SHORT).show()
+                }
+            } finally {
+                withContext(Dispatchers.Main) {
+                    binding.progressBar.visibility = View.GONE
                 }
             }
         }
     }
 
-    private fun parseDate(doc: Document): String {
-        val dateElement = doc.select("ul.zg li.zgr").first()
-        return dateElement?.text() ?: SimpleDateFormat("dd.MM.yyyy", Locale("ru")).format(Date())
-    }
+    private suspend fun loadBellSchedule(): it.hamy.schedule.model.BellSchedule? {
+//        val cached = Cache.loadBellSchedule(requireContext())
+//        if (cached != null) {
+//            Log.d("BELL_SCHEDULE", "💾 [ЗВОНКИ] Используем кешированное расписание: $cached")
+//            return cached
+//        }
 
-    private fun parseSchedule(doc: Document, group: String, date: String) {
-        scheduleItems.clear()
-
-        val rows: Elements = doc.select("table.inf tr")
-        var currentGroupLink = ""
-
-        for (row in rows) {
-            // Ищем ячейку с классом 'hd' и атрибутом 'rowspan', внутри которой есть ссылка
-            val groupCell = row.select("td.hd[rowspan] a[href]")
-
-            if (groupCell.isNotEmpty()) {
-                // Извлекаем ссылку целиком из атрибута 'href'
-                val groupLink = groupCell.attr("href").substringBefore(".htm") // Теперь сохраняем всю ссылку до .htm
-                currentGroupLink = groupLink
-
-                // Выводим в лог название группы и её ссылку для сравнения
-                Log.d("GroupComparison", "Group: $group, Link: $currentGroupLink")
-            }
-
-            // Пропускаем строки, если ссылка группы не совпадает
-            if (currentGroupLink != group) continue
-
-            val timeCell = row.select("td.hd").firstOrNull { it.attr("rowspan").isEmpty() }?.text()
-            val subjectRaw = row.select("a.z1").map { it.text() }
-            val teacherRaw = row.select("a.z3").map { it.text() }
-            val roomRaw = row.select("a.z2").map { it.text() }
-
-            val subject = subjectRaw.distinct().joinToString(" / ")
-            val teacher = teacherRaw.distinct().joinToString(" / ")
-            val room = roomRaw.distinct().joinToString(" / ")
-
-            if (!timeCell.isNullOrEmpty() && subject.isNotEmpty()) {
-                scheduleItems.add(ScheduleItem(formatDate(date), timeCell, subject, teacher, room))
-            }
+        if (!isNetworkAvailable()) {
+            Log.w("BELL_SCHEDULE", "🌐 [ЗВОНКИ] Нет сети — не можем загрузить")
+            return null
         }
-    }
 
-    private fun formatDate(dateStr: String): String {
-        return try {
-            val inputFormat = SimpleDateFormat("dd.MM.yyyy E", Locale("ru"))
-            val date = inputFormat.parse(dateStr)
-
-            val dayOfWeekFormat = SimpleDateFormat("EEEE", Locale("ru"))
-            val dayMonthFormat = SimpleDateFormat("d MMMM", Locale("ru"))
-
-            val dayOfWeek = dayOfWeekFormat.format(date!!)
-            val dayMonth = dayMonthFormat.format(date)
-
-            "$dayMonth, $dayOfWeek"
-        } catch (e: Exception) {
-            dateStr
+        val fetched = ParseBellSchedule.fetchBellSchedule()
+        if (fetched != null) {
+            Cache.saveBellSchedule(requireContext(), fetched)
+            Log.d("BELL_SCHEDULE", "✅ [ЗВОНКИ] Сохранили в кеш: $fetched")
+        } else {
+            Log.e("BELL_SCHEDULE", "❌ [ЗВОНКИ] Не удалось загрузить расписание звонков")
         }
+        return fetched
     }
 
     private fun loadScheduleFromCache() {
-        val prefs = requireContext().getSharedPreferences("schedule_cache", Context.MODE_PRIVATE)
-        val cachedJson = prefs.getString("cached_today_schedule", null)
-
-        if (cachedJson != null) {
-            val type = object : com.google.gson.reflect.TypeToken<List<ScheduleItem>>() {}.type
-            val cachedList: List<ScheduleItem> = gson.fromJson(cachedJson, type)
+        val cachedList = Cache.loadTodaySchedule(requireContext())
+        if (cachedList != null) {
             scheduleItems.clear()
             scheduleItems.addAll(cachedList)
-            activity?.runOnUiThread { showSchedule() }
+            showSchedule()
         } else {
-            activity?.runOnUiThread {
-                Toast.makeText(requireContext(), "Нет сохранённого расписания", Toast.LENGTH_SHORT).show()
-            }
+            Toast.makeText(requireContext(), "Нет сохранённого расписания", Toast.LENGTH_SHORT).show()
         }
+        binding.progressBar.visibility = View.GONE
     }
 
-    private fun saveScheduleToCache(schedule: List<ScheduleItem>) {
-        val prefs = requireContext().getSharedPreferences("schedule_cache", Context.MODE_PRIVATE)
-        val editor = prefs.edit()
-        val json = gson.toJson(schedule)
-        editor.putString("cached_today_schedule", json)
-        editor.apply()
+    private fun saveScheduleToCache() {
+        Cache.saveTodaySchedule(requireContext(), scheduleItems)
     }
 
     private fun isNetworkAvailable(): Boolean {
-        val connectivityManager = activity?.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
-        val networkInfo = connectivityManager.activeNetworkInfo
-        return networkInfo != null && networkInfo.isConnected
+        val cm = activity?.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+        return cm.activeNetworkInfo?.isConnected == true
     }
 
     private fun showSchedule() {
@@ -188,253 +139,219 @@ class TodayFragment : Fragment() {
 
         if (scheduleItems.isEmpty()) {
             binding.textView.text = "Расписание отсутствует"
+            binding.textView.visibility = View.VISIBLE
             return
-        }
-        else
-        {
+        } else {
             binding.textView.visibility = View.GONE
         }
 
-        val scheduleContainer = binding.scheduleContainer
-        scheduleContainer.removeAllViews()
+        val container = binding.scheduleContainer
+        container.removeAllViews()
 
-
-        // Add greeting above the schedule
-        val greetingTextView = TextView(requireContext()).apply {
-            text = getGreetingBasedOnTime()  // Приветствие
+        container.addView(TextView(requireContext()).apply {
+            text = getGreeting()
             textSize = 28f
             setTypeface(null, Typeface.BOLD)
             setPadding(26, 16, 26, 8)
-        }
-        binding.scheduleContainer.addView(greetingTextView)
+        })
 
-        // Add date title
-        val dateTitle = TextView(requireContext()).apply {
-            text = scheduleItems.firstOrNull()?.day ?: "Сегодня"        // дата
+        val dateTitle = scheduleItems.firstOrNull()?.day ?: "Сегодня"
+        container.addView(TextView(requireContext()).apply {
+            text = dateTitle
             textSize = 20f
             setTypeface(null, Typeface.BOLD)
             setPadding(26, 16, 26, 8)
-        }
-        scheduleContainer.addView(dateTitle)
+        })
 
-// Флаг для отслеживания текущего состояния текста
-        var isTimeToNextLesson = false
-
-// Add greeting above the schedule
-        val timeTextView = TextView(requireContext()).apply {
-            text = getCurrentTimeString()  // текущее время
+        var isShowingTimeToLesson = false
+        val timeView = TextView(requireContext()).apply {
+            text = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
             textSize = 36f
             setTypeface(null, Typeface.BOLD)
             setPadding(26, 16, 26, 12)
         }
 
-// Обработчик клика для чередования текста
-        timeTextView.setOnClickListener {
-            if (isTimeToNextLesson) {
-                // Если показываем время до звонка, меняем на текущее время
-                timeTextView.text = getCurrentTimeString()
-                timeTextView.textSize = 36f  // Устанавливаем размер шрифта для текущего времени
-            } else {
-                // Если показываем текущее время, меняем на время до звонка
-                val timeToNextLesson = getTimeToNextLesson()
-                timeTextView.text = timeToNextLesson
-                timeTextView.textSize = 22f  // Устанавливаем размер шрифта для времени до звонка
-            }
-
-            // Меняем флаг
-            isTimeToNextLesson = !isTimeToNextLesson
+        timeView.setOnClickListener {
+            isShowingTimeToLesson = !isShowingTimeToLesson
+            timeView.text = if (isShowingTimeToLesson) getTimeToNextLesson() else getCurrentTime()
+            timeView.textSize = if (isShowingTimeToLesson) 22f else 36f
         }
 
-// Добавляем TextView в контейнер расписания
-        binding.scheduleContainer.addView(timeTextView)
+        container.addView(timeView)
 
-
-
-        // Add lessons
         for (lesson in scheduleItems) {
-            val cardView = LayoutInflater.from(requireContext()).inflate(R.layout.lesson_item, null) as CardView
+            Log.d("BELL_SCHEDULE", "📄 [РАСПИСАНИЕ] Обрабатываем урок: '${lesson.subject}', номер: '${lesson.time}', день: '${lesson.actualDayOfWeek}'")
 
-            val lessonNumberTextView = cardView.findViewById<TextView>(R.id.lessonNumber)
-            val lessonSubjectTextView = cardView.findViewById<TextView>(R.id.lessonSubject)
-            val lessonTeacherTextView = cardView.findViewById<TextView>(R.id.lessonTeacher)
-            val lessonRoomTextView = cardView.findViewById<TextView>(R.id.lessonRoom)
-            val lessonTimeTextView = cardView.findViewById<TextView>(R.id.lessonTime)
+            val card = LayoutInflater.from(requireContext()).inflate(R.layout.lesson_item, null) as CardView
 
-            lessonNumberTextView.text = lesson.time
-            lessonSubjectTextView.text = lesson.subject
-            lessonTeacherTextView.text = lesson.teacher
-            lessonRoomTextView.text = if (lesson.room.isNotBlank()) {
-                "Кабинет: ${lesson.room}"
-            } else {
-                "Дистант"
-            }
+            card.findViewById<TextView>(R.id.lessonNumber).text = lesson.time
+            card.findViewById<TextView>(R.id.lessonSubject).text = lesson.subject
+            card.findViewById<TextView>(R.id.lessonTeacher).text = lesson.teacher
+            card.findViewById<TextView>(R.id.lessonRoom).text = if (lesson.room.isNotBlank()) "Кабинет: ${lesson.room}" else "Дистант"
 
-            val lessonTime = getLessonTime(lesson.time)
+            val lessonTime = getLessonTime(lesson.time, lesson.actualDayOfWeek)
+            card.findViewById<TextView>(R.id.lessonTime).text = lessonTime
 
-            lessonTimeTextView.text = lessonTime
+            Log.d("BELL_SCHEDULE", "⏱️ [РАСПИСАНИЕ] Для урока '${lesson.subject}' получено время: '$lessonTime'")
 
+            val progressBar = card.findViewById<ProgressBar>(R.id.lessonProgress)
+            setupProgressBar(progressBar, lessonTime)
 
-            val params = LinearLayout.LayoutParams(
+            card.layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            )
+            ).apply { setMargins(16, 16, 16, 16) }
 
-            params.setMargins(16, 16, 16, 16)  // 16dp margin for all edges
-            cardView.layoutParams = params
-
-            scheduleContainer.addView(cardView)
+            container.addView(card)
         }
     }
 
-    private fun getLessonTime(lessonNumber: String): String {
-        val currentDayOfWeek = SimpleDateFormat("EEEE", Locale("ru")).format(Date())
+    private fun getLessonTime(lessonNumber: String, dayOfWeek: String?): String {
+        Log.d("BELL_SCHEDULE", "🔍 [ПОИСК ВРЕМЕНИ] Ищем пару номер '$lessonNumber' для дня '$dayOfWeek'")
 
-        return when (currentDayOfWeek) {
+        if (dayOfWeek == null) {
+            Log.w("BELL_SCHEDULE", "⚠️ [ПОИСК ВРЕМЕНИ] dayOfWeek = null")
+            return "Время не указано"
+        }
+
+        if (bellSchedule == null) {
+            Log.w("BELL_SCHEDULE", "⚠️ [ПОИСК ВРЕМЕНИ] bellSchedule = null")
+            return "Время не указано"
+        }
+
+        val foundTime = when (dayOfWeek) {
             "понедельник" -> {
-                when (lessonNumber) {
-                    "1" -> "08:30 – 10:00"
-                    "2" -> "10:10 – 11:40"
-                    "3" -> "12:10 – 13:40"
-                    "4" -> "13:50 – 15:20"
-                    "5" -> "15:30 – 16:50"
-                    "6" -> "17:00 – 18:20"
-                    else -> "Время не указано"
-                }
+                Log.d("BELL_SCHEDULE", "📅 [ПОИСК ВРЕМЕНИ] Ищем в bellSchedule.monday: ${bellSchedule!!.monday}")
+                bellSchedule!!.monday.find { it.number == lessonNumber }?.time
             }
             "вторник" -> {
-                when (lessonNumber) {
-                    "1" -> "08:30 – 10:00"
-                    "2" -> "10:10 – 11:40"
-                    "3" -> "12:10 – 13:40"
-                    "4" -> "13:50 – 15:20"
-                    "5" -> "15:30 – 16:50"
-                    "6" -> "17:00 – 18:20"
-                    else -> "Время не указано"
-                }
+                Log.d("BELL_SCHEDULE", "📅 [ПОИСК ВРЕМЕНИ] Ищем в bellSchedule.tuesday: ${bellSchedule!!.tuesday}")
+                bellSchedule!!.tuesday.find { it.number == lessonNumber }?.time
             }
-            "среда" -> { // Среда
-                when (lessonNumber) {
-                    "1" -> "09:00 – 10:30"
-                    "2" -> "10:40 – 12:10"
-                    "3" -> "12:30 – 14:00"
-                    "4" -> "14:10 – 15:40"
-                    "5" -> "15:50 – 17:10"
-                    "6" -> "17:20 – 18:40"
-                    else -> "Время не указано"
-                }
+            "среда" -> {
+                Log.d("BELL_SCHEDULE", "📅 [ПОИСК ВРЕМЕНИ] Ищем в bellSchedule.wednesday: ${bellSchedule!!.wednesday}")
+                bellSchedule!!.wednesday.find { it.number == lessonNumber }?.time
             }
             "четверг" -> {
-                when (lessonNumber) {
-                    "1" -> "08:30 – 10:00"
-                    "2" -> "10:10 – 11:40"
-                    "3" -> "12:10 – 13:40"
-                    "4" -> "13:50 – 15:20"
-                    "5" -> "15:30 – 16:50"
-                    "6" -> "17:00 – 18:20"
-                    else -> "Время не указано"
-                }
+                Log.d("BELL_SCHEDULE", "📅 [ПОИСК ВРЕМЕНИ] Ищем в bellSchedule.thursday: ${bellSchedule!!.thursday}")
+                bellSchedule!!.thursday.find { it.number == lessonNumber }?.time
             }
-            "пятница" -> { // Пятница
-                when (lessonNumber) {
-                    "1" -> "08:30 – 10:00"
-                    "2" -> "10:10 – 11:40"
-                    "3" -> "12:10 – 13:40"
-                    "4" -> "13:50 – 15:20"
-                    "5" -> "15:30 – 16:50"
-                    "6" -> "17:00 – 18:20"
-                    else -> "Время не указано"
-                }
+            "пятница" -> {
+                Log.d("BELL_SCHEDULE", "📅 [ПОИСК ВРЕМЕНИ] Ищем в bellSchedule.friday: ${bellSchedule!!.friday}")
+                bellSchedule!!.friday.find { it.number == lessonNumber }?.time
             }
+            "суббота" -> ""
+            else -> {
+                Log.w("BELL_SCHEDULE", "❓ [ПОИСК ВРЕМЕНИ] Неизвестный день: $dayOfWeek")
+                null
+            }
+        }
 
-            "суббота" -> { // Суббота
-                ""  // В субботу не выводим расписание
-            }
-
-            else -> { // Для всех остальных дней
-                when (lessonNumber) {
-                    "1" -> "08:30 – 10:00"
-                    "2" -> "10:10 – 11:40"
-                    "3" -> "11:50 – 13:20"
-                    "4" -> "13:30 – 15:00"
-                    "5" -> "15:10 – 16:40"
-                    "6" -> "16:50 – 18:20"
-                    else -> "Время не указано"
-                }
-            }
+        if (foundTime != null) {
+            Log.d("BELL_SCHEDULE", "✅ [ПОИСК ВРЕМЕНИ] Найдено время: '$foundTime'")
+            return foundTime
+        } else {
+            Log.w("BELL_SCHEDULE", "❌ [ПОИСК ВРЕМЕНИ] Время НЕ найдено для пары '$lessonNumber' в день '$dayOfWeek'")
+            return "Время не указано"
         }
     }
 
-    private fun getGreetingBasedOnTime(): String {
-        val currentHour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+    private fun setupProgressBar(progressBar: ProgressBar, lessonTime: String) {
+        if (lessonTime == "Время не указано" || !lessonTime.contains("–")) {
+            progressBar.visibility = View.GONE
+            return
+        }
 
-        return when {
-            currentHour in 5..11 -> "Доброе утро ☺\uFE0F"
-            currentHour in 12..17 -> "Добрый день \uD83E\uDD2A"
-            currentHour in 18..21 -> "Добрый вечер \uD83D\uDE0C"
-            else -> "Доброй ночи \uD83D\uDE34"
+        val parts = lessonTime.split(" – ")
+        if (parts.size != 2) {
+            progressBar.visibility = View.GONE
+            return
+        }
+
+        val now = Calendar.getInstance()
+        val start = parseTime(parts[0]).apply {
+            set(Calendar.YEAR, now.get(Calendar.YEAR))
+            set(Calendar.MONTH, now.get(Calendar.MONTH))
+            set(Calendar.DAY_OF_MONTH, now.get(Calendar.DAY_OF_MONTH))
+        }
+        val end = parseTime(parts[1]).apply {
+            set(Calendar.YEAR, now.get(Calendar.YEAR))
+            set(Calendar.MONTH, now.get(Calendar.MONTH))
+            set(Calendar.DAY_OF_MONTH, now.get(Calendar.DAY_OF_MONTH))
+        }
+
+        if (now.after(start) && now.before(end)) {
+            val total = end.timeInMillis - start.timeInMillis
+            val elapsed = now.timeInMillis - start.timeInMillis
+            val progress = (elapsed * 100 / total).toInt()
+
+            progressBar.apply {
+                visibility = View.VISIBLE
+                max = 100
+                this.progress = progress
+            }
+        } else {
+            progressBar.visibility = View.GONE
         }
     }
 
-
-    // Метод для получения текущего времени в строковом формате
-    private fun getCurrentTimeString(): String {
-        val currentTime = SimpleDateFormat("HH:mm", Locale("ru")).format(Date())
-        return currentTime
+    private fun parseTime(timeStr: String): Calendar {
+        val cal = Calendar.getInstance()
+        val sdf = SimpleDateFormat("HH:mm", Locale.getDefault())
+        cal.time = sdf.parse(timeStr) ?: Date()
+        return cal
     }
 
+    private fun getGreeting(): String {
+        return when (Calendar.getInstance().get(Calendar.HOUR_OF_DAY)) {
+            in 5..11 -> "Доброе утро ☺️"
+            in 12..17 -> "Добрый день 🤪"
+            in 18..21 -> "Добрый вечер 🙂"
+            else -> "Доброй ночи 😴"
+        }
+    }
 
+    private fun getCurrentTime(): String = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
 
     fun getTimeToNextLesson(): String {
-        val currentTime = Calendar.getInstance()  // Текущее время
-        val currentDayOfWeek = SimpleDateFormat("EEEE", Locale("ru")).format(Date())  // Текущий день недели
+        val now = Calendar.getInstance()
+        val targetDay = scheduleItems.firstOrNull()?.actualDayOfWeek ?: return "День не определен"
+        val schedule = when (targetDay) {
+            "понедельник" -> bellSchedule?.monday
+            "вторник" -> bellSchedule?.tuesday
+            "среда" -> bellSchedule?.wednesday
+            "четверг" -> bellSchedule?.thursday
+            "пятница" -> bellSchedule?.friday
+            "суббота" -> return "Выходной"
+            else -> null
+        } ?: return "Расписание не загружено"
 
-        // Получаем все занятия на текущий день
-        for (lessonNumber in 1..6) {  // Проходим по всем 6 возможным парам
-            val lessonTime = getLessonTime(lessonNumber.toString())  // Получаем время текущего занятия
+        for (lesson in schedule) {
+            val parts = lesson.time.split(" – ")
+            if (parts.size != 2) continue
 
-            if (lessonTime != "Время не указано" && lessonTime != "") {
-                val lessonTimes = lessonTime.split(" – ")
-                val startLessonTime = lessonTimes[0]
-                val endLessonTime = lessonTimes[1]
+            val start = parseTime(parts[0]).apply {
+                set(Calendar.YEAR, now.get(Calendar.YEAR))
+                set(Calendar.MONTH, now.get(Calendar.MONTH))
+                set(Calendar.DAY_OF_MONTH, now.get(Calendar.DAY_OF_MONTH))
+            }
+            val end = parseTime(parts[1]).apply {
+                set(Calendar.YEAR, now.get(Calendar.YEAR))
+                set(Calendar.MONTH, now.get(Calendar.MONTH))
+                set(Calendar.DAY_OF_MONTH, now.get(Calendar.DAY_OF_MONTH))
+            }
 
-                // Преобразуем время начала и конца занятия в объекты Calendar
-                val startTimeCalendar = Calendar.getInstance()
-                val endTimeCalendar = Calendar.getInstance()
-                val timeFormat = SimpleDateFormat("HH:mm", Locale("ru"))
-
-                startTimeCalendar.time = timeFormat.parse(startLessonTime)
-                endTimeCalendar.time = timeFormat.parse(endLessonTime)
-
-                // Привязываем дату текущего дня к времени начала и окончания урока
-                startTimeCalendar.set(Calendar.YEAR, currentTime.get(Calendar.YEAR))
-                startTimeCalendar.set(Calendar.MONTH, currentTime.get(Calendar.MONTH))
-                startTimeCalendar.set(Calendar.DAY_OF_MONTH, currentTime.get(Calendar.DAY_OF_MONTH))
-
-                endTimeCalendar.set(Calendar.YEAR, currentTime.get(Calendar.YEAR))
-                endTimeCalendar.set(Calendar.MONTH, currentTime.get(Calendar.MONTH))
-                endTimeCalendar.set(Calendar.DAY_OF_MONTH, currentTime.get(Calendar.DAY_OF_MONTH))
-
-                // Если текущее время до начала занятия
-                if (currentTime.before(startTimeCalendar)) {
-                    val diffMillis = startTimeCalendar.timeInMillis - currentTime.timeInMillis
-                    val diffMinutes = diffMillis / (1000 * 60)  // Разница в минутах
-                    return "До пар: $diffMinutes минут"
-                }
-
-                // Если текущее время в пределах занятия (сейчас идет урок)
-                if (currentTime.after(startTimeCalendar) && currentTime.before(endTimeCalendar)) {
-                    val diffMillis = endTimeCalendar.timeInMillis - currentTime.timeInMillis
-                    val diffMinutes = diffMillis / (1000 * 60)  // Разница в минутах
-                    return "До конца пары: $diffMinutes минут"
-                }
+            if (now.before(start)) {
+                val mins = (start.timeInMillis - now.timeInMillis) / 60000
+                return "До пары: $mins мин"
+            }
+            if (now.after(start) && now.before(end)) {
+                val mins = (end.timeInMillis - now.timeInMillis) / 60000
+                return "До конца: $mins мин"
             }
         }
-
-        // Если на текущий момент нет активных занятий
-        return "Занятий на сегодня больше нет или все занятия завершены."
+        return "Пар больше нет"
     }
-
-
 
     override fun onDestroyView() {
         super.onDestroyView()

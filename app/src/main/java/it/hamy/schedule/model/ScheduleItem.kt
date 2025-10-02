@@ -6,5 +6,6 @@ data class ScheduleItem(
     val time: String,
     val subject: String,
     val teacher: String,
-    val room: String
+    val room: String,
+    val actualDayOfWeek: String? = null  // ← ДОБАВЛЕНО: "понедельник", "вторник" и т.д.
 )

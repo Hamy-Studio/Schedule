@@ -84,4 +84,12 @@
             android:text=""
             android:textSize="16sp" />
     </RelativeLayout>
+
+    <ProgressBar
+        android:id="@+id/lessonProgress"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="4dp"
+        android:layout_marginTop="8dp"
+        android:visibility="gone"/>
 </androidx.cardview.widget.CardView>
